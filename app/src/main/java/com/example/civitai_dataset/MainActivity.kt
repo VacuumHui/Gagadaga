@@ -190,13 +190,12 @@ fun MainScreen() {
                                         token = apiToken.ifBlank { null }
                                     )
                                     
-                                    val rawCount = response.items.size // Сколько картинок пришло всего
+                                    val rawCount = response.items.size
                                     
                                     // Оставляем только картинки с промптами
                                     images = response.items.filter { it.meta?.prompt != null }
                                     currentBatchIndex = 0
                                     
-                                    // Показываем детальную статистику ответа сервера
                                     Toast.makeText(
                                         context, 
                                         "Получено с сервера: $rawCount. С открытым промптом: ${images.size}", 
@@ -218,6 +217,7 @@ fun MainScreen() {
                             Text("Загрузить")
                         }
                     }
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
