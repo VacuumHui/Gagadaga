@@ -189,12 +189,20 @@ fun MainScreen() {
                                         nsfw = if (nsfwEnabled) true else null,
                                         token = apiToken.ifBlank { null }
                                     )
+                                    
+                                    val rawCount = response.items.size // Сколько картинок пришло всего
+                                    
                                     // Оставляем только картинки с промптами
                                     images = response.items.filter { it.meta?.prompt != null }
                                     currentBatchIndex = 0
-                                    if (images.isEmpty()) {
-                                        Toast.makeText(context, "Изображения не найдены", Toast.LENGTH_SHORT).show()
-                                    }
+                                    
+                                    // Показываем детальную статистику ответа сервера
+                                    Toast.makeText(
+                                        context, 
+                                        "Получено с сервера: $rawCount. С открытым промптом: ${images.size}", 
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                    
                                 } catch (e: Exception) {
                                     Toast.makeText(context, "Ошибка сети: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
                                 } finally {
@@ -210,7 +218,6 @@ fun MainScreen() {
                             Text("Загрузить")
                         }
                     }
-                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
