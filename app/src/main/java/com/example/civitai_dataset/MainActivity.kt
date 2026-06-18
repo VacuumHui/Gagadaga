@@ -38,6 +38,7 @@ import kotlinx.coroutines.launch
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.Query
 import java.io.File
 
@@ -56,11 +57,11 @@ data class DatasetItem(
 interface CivitaiApi {
     @GET("api/v1/images")
     suspend fun getImages(
+        @Header("Authorization") authHeader: String?, // Правильная авторизация через заголовок
         @Query("limit") limit: Int = 100,
         @Query("sort") sort: String = "Most Reactions",
         @Query("period") period: String,
-        @Query("nsfw") nsfw: Boolean?,
-        @Query("token") token: String?
+        @Query("nsfw") nsfw: Boolean?
     ): CivitaiResponse
 }
 
@@ -184,10 +185,13 @@ fun MainScreen() {
                             isLoading = true
                             scope.launch {
                                 try {
+                                    // Передаем токен как Bearer заголовок
+                                    val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
+                                    
                                     val response = RetrofitClient.api.getImages(
+                                        authHeader = authHeader,
                                         period = selectedPeriod,
-                                        nsfw = if (nsfwEnabled) true else null,
-                                        token = apiToken.ifBlank { null }
+                                        nsfw = if (nsfwEnabled) true else null
                                     )
                                     
                                     val rawCount = response.items.size
