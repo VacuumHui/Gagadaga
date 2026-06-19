@@ -44,8 +44,15 @@ import java.io.File
 
 // ================= DATA MODELS =================
 data class CivitaiResponse(val items: List<CivitaiImage>)
-data class CivitaiImage(val url: String, val meta: CivitaiMeta?)
+data class CivitaiImage(val id: Long, val url: String, val meta: CivitaiMeta?)
 data class CivitaiMeta(val prompt: String?)
+
+// Модели для получения точечных данных о промпте через TRPC веб-сервиса
+data class TrpcResponse(val result: TrpcResult)
+data class TrpcResult(val data: TrpcData)
+data class TrpcData(val json: TrpcJson?)
+data class TrpcJson(val meta: TrpcMeta?)
+data class TrpcMeta(val prompt: String?, val negativePrompt: String?)
 
 data class DatasetItem(
     val instruction: String = "Создай подробный промпт для SDXL на основе следующего описания.",
@@ -57,12 +64,18 @@ data class DatasetItem(
 interface CivitaiApi {
     @GET("api/v1/images")
     suspend fun getImages(
-        @Header("Authorization") authHeader: String?, // Правильная авторизация через заголовок
+        @Header("Authorization") authHeader: String?,
         @Query("limit") limit: Int = 100,
         @Query("sort") sort: String = "Most Reactions",
         @Query("period") period: String,
         @Query("nsfw") nsfw: Boolean?
     ): CivitaiResponse
+
+    // Точечный запрос данных генерации конкретного изображения
+    @GET("api/trpc/image.getGenerationData")
+    suspend fun getGenerationData(
+        @Query("input") inputJson: String
+    ): TrpcResponse
 }
 
 object RetrofitClient {
@@ -116,12 +129,35 @@ fun MainScreen() {
     var selectedImage by remember { mutableStateOf<CivitaiImage?>(null) }
     var userDescription by remember { mutableStateOf("") }
 
+    // Состояния для асинхронной загрузки промпта
+    var promptLoading by remember { mutableStateOf(false) }
+    var loadedPrompt by remember { mutableStateOf("") }
+
     // Локальный датасет
     var dataset by remember { mutableStateOf<List<DatasetItem>>(emptyList()) }
 
     // Загрузка датасета при старте
     LaunchedEffect(Unit) {
         dataset = loadDatasetFromFile(context)
+    }
+
+    // Слушатель выбора картинки: загружаем промпт в фоне при её открытии
+    LaunchedEffect(selectedImage) {
+        selectedImage?.let { img ->
+            promptLoading = true
+            loadedPrompt = "Загрузка промпта с сервера..."
+            try {
+                // Формируем TRPC-совместимый JSON запрос
+                val jsonRequest = "{\"json\":{\"id\":${img.id}}}"
+                val response = RetrofitClient.api.getGenerationData(jsonRequest)
+                val prompt = response.result.data.json?.meta?.prompt
+                loadedPrompt = prompt?.trim() ?: "Промпт для этого изображения скрыт автором или отсутствует."
+            } catch (e: Exception) {
+                loadedPrompt = "Ошибка загрузки промпта: ${e.localizedMessage}"
+            } finally {
+                promptLoading = false
+            }
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -185,7 +221,6 @@ fun MainScreen() {
                             isLoading = true
                             scope.launch {
                                 try {
-                                    // Передаем токен как Bearer заголовок
                                     val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
                                     
                                     val response = RetrofitClient.api.getImages(
@@ -194,15 +229,13 @@ fun MainScreen() {
                                         nsfw = if (nsfwEnabled) true else null
                                     )
                                     
-                                    val rawCount = response.items.size
-                                    
-                                    // Оставляем только картинки с промптами
-                                    images = response.items.filter { it.meta?.prompt != null }
+                                    // Теперь сохраняем ВСЕ картинки без фильтрации на старте
+                                    images = response.items
                                     currentBatchIndex = 0
                                     
                                     Toast.makeText(
                                         context, 
-                                        "Получено с сервера: $rawCount. С открытым промптом: ${images.size}", 
+                                        "Загружено изображений с сервера: ${images.size}", 
                                         Toast.LENGTH_LONG
                                     ).show()
                                     
@@ -264,21 +297,6 @@ fun MainScreen() {
                                             modifier = Modifier.fillMaxSize(),
                                             contentScale = ContentScale.Crop
                                         )
-                                        Box(
-                                            modifier = Modifier
-                                                .align(Alignment.BottomStart)
-                                                .fillMaxWidth()
-                                                .padding(4.dp)
-                                        ) {
-                                            Text(
-                                                text = item.meta?.prompt ?: "",
-                                                fontSize = 10.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = androidx.compose.ui.graphics.Color.White
-                                            )
-                                        }
                                     }
                                 }
                             }
@@ -452,7 +470,7 @@ fun MainScreen() {
                             shape = MaterialTheme.shapes.small
                         ) {
                             Text(
-                                text = img.meta?.prompt ?: "",
+                                text = if (promptLoading) "Загрузка промпта с сервера..." else loadedPrompt,
                                 fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace,
                                 modifier = Modifier.padding(8.dp)
@@ -471,21 +489,27 @@ fun MainScreen() {
                             Text("Отмена")
                         }
                         Spacer(modifier = Modifier.width(8.dp))
-                        Button(onClick = {
-                            if (userDescription.isNotBlank()) {
-                                val newItem = DatasetItem(
-                                    input = userDescription,
-                                    output = img.meta?.prompt ?: ""
-                                )
-                                dataset = dataset + newItem
-                                saveDatasetToFile(context, dataset)
-                                selectedImage = null
-                                userDescription = ""
-                                Toast.makeText(context, "Сохранено!", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Пожалуйста, введите описание!", Toast.LENGTH_SHORT).show()
+                        Button(
+                            onClick = {
+                                if (userDescription.isNotBlank() && !promptLoading && !loadedPrompt.startsWith("Ошибка") && !loadedPrompt.startsWith("Загрузка")) {
+                                    val newItem = DatasetItem(
+                                        input = userDescription,
+                                        output = loadedPrompt
+                                    )
+                                    dataset = dataset + newItem
+                                    saveDatasetToFile(context, dataset)
+                                    selectedImage = null
+                                    userDescription = ""
+                                    Toast.makeText(context, "Сохранено!", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    if (promptLoading) {
+                                        Toast.makeText(context, "Пожалуйста, дождитесь загрузки промпта", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        Toast.makeText(context, "Введите описание и проверьте промпт!", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
                             }
-                        }) {
+                        ) {
                             Text("Сохранить")
                         }
                     }
