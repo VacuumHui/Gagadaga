@@ -71,9 +71,10 @@ interface CivitaiApi {
         @Query("nsfw") nsfw: Boolean?
     ): CivitaiResponse
 
-    // Точечный запрос данных генерации конкретного изображения
+    // Передаем токен авторизации также и в точечный TRPC-запрос для обхода ошибки 401
     @GET("api/trpc/image.getGenerationData")
     suspend fun getGenerationData(
+        @Header("Authorization") authHeader: String?,
         @Query("input") inputJson: String
     ): TrpcResponse
 }
@@ -149,7 +150,11 @@ fun MainScreen() {
             try {
                 // Формируем TRPC-совместимый JSON запрос
                 val jsonRequest = "{\"json\":{\"id\":${img.id}}}"
-                val response = RetrofitClient.api.getGenerationData(jsonRequest)
+                
+                // Передаем токен в заголовок запроса
+                val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
+                
+                val response = RetrofitClient.api.getGenerationData(authHeader, jsonRequest)
                 val prompt = response.result.data.json?.meta?.prompt
                 loadedPrompt = prompt?.trim() ?: "Промпт для этого изображения скрыт автором или отсутствует."
             } catch (e: Exception) {
