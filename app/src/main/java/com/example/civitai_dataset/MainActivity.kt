@@ -48,10 +48,18 @@ import retrofit2.http.Query
 import java.io.File
 
 // ================= DATA MODELS =================
-data class CivitaiResponse(val items: List<CivitaiImage>)
-data class CivitaiImage(val id: Long, val url: String, val meta: CivitaiMeta?)
+data class CivitaiResponse(val items: List<CivitaiImage>, val metadata: CivitaiMetadata?)
+data class CivitaiMetadata(val nextCursor: String?)
+
+data class CivitaiImage(
+    val id: Long, 
+    val url: String, 
+    val username: String?, // Никнейм автора картинки
+    val meta: CivitaiMeta?
+)
 data class CivitaiMeta(val prompt: String?)
 
+// Модели для TRPC-запроса промпта
 data class TrpcResponse(val result: TrpcResult)
 data class TrpcResult(val data: TrpcData)
 data class TrpcData(val json: TrpcJson?)
@@ -72,7 +80,9 @@ interface CivitaiApi {
         @Query("limit") limit: Int = 100,
         @Query("sort") sort: String = "Most Reactions",
         @Query("period") period: String,
-        @Query("nsfw") nsfw: Boolean?
+        @Query("nsfw") nsfw: Boolean?,
+        @Query("username") username: String?, // Поиск по автору
+        @Query("cursor") cursor: String? // Курсор для пагинации
     ): CivitaiResponse
 
     @GET("api/trpc/image.getGenerationData")
@@ -98,22 +108,21 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Инициализация кэш-менеджера Coil с лимитом в 1 ГБ диска и 25% ОЗУ устройства
+        // Инициализация кэш-менеджера Coil (Лимит 1 ГБ диска, 25% ОЗУ)
         val imageLoader = ImageLoader.Builder(this)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.25) // 25% от доступной приложению оперативной памяти
+                    .maxSizePercent(0.25)
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(this.cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(1024 * 1024 * 1024) // 1 ГБ в байтах
+                    .maxSizeBytes(1024 * 1024 * 1024)
                     .build()
             }
             .build()
         
-        // Устанавливаем данный загрузчик как глобальный для всего приложения
         Coil.setImageLoader(imageLoader)
 
         setContent {
@@ -139,12 +148,15 @@ fun MainScreen() {
 
     // Настройки запроса
     var selectedPeriod by remember { mutableStateOf("Week") }
+    var selectedSort by remember { mutableStateOf("Most Reactions") } // "Most Reactions" или "Newest"
     var nsfwEnabled by remember { mutableStateOf(false) }
     var apiToken by remember { mutableStateOf("") }
+    var activeUsername by remember { mutableStateOf("") } // Активный фильтр по автору
 
-    // Данные изображений
+    // Данные изображений и пагинации
     var images by remember { mutableStateOf<List<CivitaiImage>>(emptyList()) }
     var currentBatchIndex by remember { mutableIntStateOf(0) }
+    var nextCursor by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(false) }
 
     // Выбранная картинка для разметки
@@ -172,7 +184,7 @@ fun MainScreen() {
     var editInputText by remember { mutableStateOf("") }
     var editOutputText by remember { mutableStateOf("") }
 
-    // Загрузка списка файлов баз и активной базы при запуске
+    // Загрузка баз при старте
     LaunchedEffect(Unit) {
         dbList = getDatabaseList(context)
         dataset = loadDatasetFromFile(context, currentDbName)
@@ -220,34 +232,66 @@ fun MainScreen() {
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
-                // Настройки поиска и NSFW
+                // Строка настроек и запуска загрузки
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Топ за: ", fontSize = 14.sp)
-                        val periods = listOf("Day", "Week", "Month", "Year")
-                        var expanded by remember { mutableStateOf(false) }
-                        Box {
-                            Text(
-                                selectedPeriod,
-                                modifier = Modifier
-                                    .clickable { expanded = true }
-                                    .padding(8.dp),
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold
-                            )
-                            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                                periods.forEach { p ->
-                                    DropdownMenuItem(
-                                        text = { Text(p) },
-                                        onClick = {
-                                            selectedPeriod = p
-                                            expanded = false
-                                        }
-                                    )
+                    Column {
+                        // Топ за период
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Топ за: ", fontSize = 12.sp)
+                            val periods = listOf("Day", "Week", "Month", "Year")
+                            var expanded by remember { mutableStateOf(false) }
+                            Box {
+                                Text(
+                                    selectedPeriod,
+                                    modifier = Modifier
+                                        .clickable { expanded = true }
+                                        .padding(4.dp),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                                DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                                    periods.forEach { p ->
+                                        DropdownMenuItem(
+                                            text = { Text(p) },
+                                            onClick = {
+                                                selectedPeriod = p
+                                                expanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        // Сортировка (Популярные / Новые)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Сорт: ", fontSize = 12.sp)
+                            val sorts = mapOf("Most Reactions" to "Популярные", "Newest" to "Новые")
+                            var expandedSort by remember { mutableStateOf(false) }
+                            Box {
+                                Text(
+                                    sorts[selectedSort] ?: "Популярные",
+                                    modifier = Modifier
+                                        .clickable { expandedSort = true }
+                                        .padding(4.dp),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp
+                                )
+                                DropdownMenu(expanded = expandedSort, onDismissRequest = { expandedSort = false }) {
+                                    sorts.forEach { (key, name) ->
+                                        DropdownMenuItem(
+                                            text = { Text(name) },
+                                            onClick = {
+                                                selectedSort = key
+                                                expandedSort = false
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -255,7 +299,7 @@ fun MainScreen() {
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = nsfwEnabled, onCheckedChange = { nsfwEnabled = it })
-                        Text("NSFW", fontSize = 14.sp)
+                        Text("NSFW", fontSize = 12.sp)
                     }
 
                     Button(
@@ -267,9 +311,13 @@ fun MainScreen() {
                                     val response = RetrofitClient.api.getImages(
                                         authHeader = authHeader,
                                         period = selectedPeriod,
-                                        nsfw = if (nsfwEnabled) true else null
+                                        nsfw = if (nsfwEnabled) true else null,
+                                        sort = selectedSort,
+                                        username = activeUsername.ifBlank { null },
+                                        cursor = null // Сбрасываем курсор на первую страницу при новом запросе
                                     )
                                     images = response.items
+                                    nextCursor = response.metadata?.nextCursor
                                     currentBatchIndex = 0
                                     Toast.makeText(context, "Загружено изображений: ${images.size}", Toast.LENGTH_SHORT).show()
                                 } catch (e: Exception) {
@@ -281,15 +329,66 @@ fun MainScreen() {
                         },
                         enabled = !isLoading
                     ) {
-                        if (isLoading) {
+                        if (isLoading && currentBatchIndex == 0) {
                             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                         } else {
-                            Text("Загрузить")
+                            Text("Загрузить", fontSize = 12.sp)
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // Фильтр-плашка активного автора (если выбран)
+                if (activeUsername.isNotBlank()) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("🔍 Работы автора: @$activeUsername", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(
+                                "Сбросить [X]",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .clickable {
+                                        activeUsername = ""
+                                        // Автозапуск загрузки без фильтра автора
+                                        isLoading = true
+                                        scope.launch {
+                                            try {
+                                                val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
+                                                val response = RetrofitClient.api.getImages(
+                                                    authHeader = authHeader,
+                                                    period = selectedPeriod,
+                                                    nsfw = if (nsfwEnabled) true else null,
+                                                    sort = selectedSort,
+                                                    username = null,
+                                                    cursor = null
+                                                )
+                                                images = response.items
+                                                nextCursor = response.metadata?.nextCursor
+                                                currentBatchIndex = 0
+                                            } catch (e: Exception) {
+                                                Toast.makeText(context, "Ошибка сети: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                            } finally {
+                                                isLoading = false
+                                            }
+                                        }
+                                    }
+                                    .padding(4.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
 
                 OutlinedTextField(
                     value = apiToken,
@@ -299,7 +398,7 @@ fun MainScreen() {
                     singleLine = true
                 )
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // Сетка из 4 картинок
                 if (images.isNotEmpty()) {
@@ -335,11 +434,14 @@ fun MainScreen() {
                         }
                     }
 
-                    // Навигация
+                    // Навигация (с поддержкой дозагрузки)
+                    val isLastBatch = currentBatchIndex + 4 >= images.size
+                    val canLoadMore = nextCursor != null
+
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 16.dp),
+                            .padding(vertical = 12.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -350,13 +452,44 @@ fun MainScreen() {
                             Text("← Назад")
                         }
 
-                        Text("Группа ${currentBatchIndex / 4 + 1} из ${images.size / 4 + 1}")
+                        Text("Позиция ${currentBatchIndex + 1} из ${images.size}", fontSize = 12.sp)
 
                         Button(
-                            onClick = { currentBatchIndex = (currentBatchIndex + 4).coerceAtMost(images.size - 1) },
-                            enabled = currentBatchIndex + 4 < images.size
+                            onClick = {
+                                if (isLastBatch && canLoadMore) {
+                                    // Авто-подгрузка следующих 100 изображений по токену курсора
+                                    isLoading = true
+                                    scope.launch {
+                                        try {
+                                            val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
+                                            val response = RetrofitClient.api.getImages(
+                                                authHeader = authHeader,
+                                                period = selectedPeriod,
+                                                nsfw = if (nsfwEnabled) true else null,
+                                                sort = selectedSort,
+                                                username = activeUsername.ifBlank { null },
+                                                cursor = nextCursor
+                                            )
+                                            images = images + response.items
+                                            nextCursor = response.metadata?.nextCursor
+                                            currentBatchIndex += 4
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Ошибка загрузки: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                        } finally {
+                                            isLoading = false
+                                        }
+                                    }
+                                } else {
+                                    currentBatchIndex = (currentBatchIndex + 4).coerceAtMost(images.size - 1)
+                                }
+                            },
+                            enabled = (!isLastBatch || canLoadMore) && !isLoading
                         ) {
-                            Text("Вперед →")
+                            if (isLoading && isLastBatch) {
+                                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                            } else {
+                                Text(if (isLastBatch) "Загрузить еще" else "Вперед →")
+                            }
                         }
                     }
                 } else {
@@ -612,7 +745,6 @@ fun MainScreen() {
                         
                         val remaining = getDatabaseList(context)
                         if (remaining.isEmpty()) {
-                            // Если баз больше не осталось, создаем заново дефолтную базу dataset.json
                             currentDbName = "dataset"
                             saveDatasetToFile(context, emptyList(), "dataset")
                         } else {
@@ -753,6 +885,47 @@ fun MainScreen() {
                         )
 
                         Spacer(modifier = Modifier.height(16.dp))
+
+                        // Блок отображения автора картинки
+                        img.username?.let { name ->
+                            Text(
+                                text = "👤 Автор: @$name",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .clickable {
+                                        activeUsername = name
+                                        selectedImage = null // Закрываем диалог
+                                        
+                                        // Автозапуск загрузки работ автора
+                                        isLoading = true
+                                        scope.launch {
+                                            try {
+                                                val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
+                                                val response = RetrofitClient.api.getImages(
+                                                    authHeader = authHeader,
+                                                    period = selectedPeriod,
+                                                    nsfw = if (nsfwEnabled) true else null,
+                                                    sort = selectedSort,
+                                                    username = name,
+                                                    cursor = null
+                                                )
+                                                images = response.items
+                                                nextCursor = response.metadata?.nextCursor
+                                                currentBatchIndex = 0
+                                            } catch (e: Exception) {
+                                                Toast.makeText(context, "Ошибка сети: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                            } finally {
+                                                isLoading = false
+                                            }
+                                        }
+                                    }
+                                    .padding(vertical = 4.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
 
                         Text("2. Оригинальный промпт (Output):", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
                         Spacer(modifier = Modifier.height(4.dp))
