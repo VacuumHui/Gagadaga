@@ -17,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -47,7 +48,6 @@ data class CivitaiResponse(val items: List<CivitaiImage>)
 data class CivitaiImage(val id: Long, val url: String, val meta: CivitaiMeta?)
 data class CivitaiMeta(val prompt: String?)
 
-// Модели для получения точечных данных о промпте через TRPC веб-сервиса
 data class TrpcResponse(val result: TrpcResult)
 data class TrpcResult(val data: TrpcData)
 data class TrpcData(val json: TrpcJson?)
@@ -56,8 +56,8 @@ data class TrpcMeta(val prompt: String?, val negativePrompt: String?)
 
 data class DatasetItem(
     val instruction: String = "Создай подробный промпт для SDXL на основе следующего описания.",
-    val input: String,
-    val output: String
+    var input: String,
+    var output: String
 )
 
 // ================= RETROFIT API =================
@@ -71,7 +71,6 @@ interface CivitaiApi {
         @Query("nsfw") nsfw: Boolean?
     ): CivitaiResponse
 
-    // Передаем токен авторизации также и в точечный TRPC-запрос для обхода ошибки 401
     @GET("api/trpc/image.getGenerationData")
     suspend fun getGenerationData(
         @Header("Authorization") authHeader: String?,
@@ -114,7 +113,7 @@ fun MainScreen() {
     val scope = rememberCoroutineScope()
 
     // Состояние вкладок
-    var activeTab by remember { mutableIntStateOf(0) } // 0 - Разметка, 1 - Статистика
+    var activeTab by remember { mutableIntStateOf(0) } 
 
     // Настройки запроса
     var selectedPeriod by remember { mutableStateOf("Week") }
@@ -126,37 +125,52 @@ fun MainScreen() {
     var currentBatchIndex by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(false) }
 
-    // Выбранная картинка для модального окна
+    // Выбранная картинка для разметки
     var selectedImage by remember { mutableStateOf<CivitaiImage?>(null) }
     var userDescription by remember { mutableStateOf("") }
 
-    // Состояния для асинхронной загрузки промпта
     var promptLoading by remember { mutableStateOf(false) }
     var loadedPrompt by remember { mutableStateOf("") }
+
+    // Управление базами данных (файлами)
+    var currentDbName by remember { mutableStateOf("dataset") }
+    var dbList by remember { mutableStateOf(listOf("dataset")) }
+    var showCreateDbDialog by remember { mutableStateOf(false) }
+    var newDbNameInput by remember { mutableStateOf("") }
 
     // Локальный датасет
     var dataset by remember { mutableStateOf<List<DatasetItem>>(emptyList()) }
 
-    // Загрузка датасета при старте
+    // Поиск по текущей базе
+    var searchQuery by remember { mutableStateOf("") }
+
+    // Состояния для редактирования записи
+    var editingItemIndex by remember { mutableStateOf<Int?>(null) }
+    var editInputText by remember { mutableStateOf("") }
+    var editOutputText by remember { mutableStateOf("") }
+
+    // Загрузка списка файлов баз и активной базы при запуске
     LaunchedEffect(Unit) {
-        dataset = loadDatasetFromFile(context)
+        dbList = getDatabaseList(context)
+        dataset = loadDatasetFromFile(context, currentDbName)
     }
 
-    // Слушатель выбора картинки: загружаем промпт в фоне при её открытии
+    // Слушатель смены активной базы данных
+    LaunchedEffect(currentDbName) {
+        dataset = loadDatasetFromFile(context, currentDbName)
+    }
+
+    // Загрузка промпта при открытии диалога картинки
     LaunchedEffect(selectedImage) {
         selectedImage?.let { img ->
             promptLoading = true
             loadedPrompt = "Загрузка промпта с сервера..."
             try {
-                // Формируем TRPC-совместимый JSON запрос
                 val jsonRequest = "{\"json\":{\"id\":${img.id}}}"
-                
-                // Передаем токен в заголовок запроса
                 val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
-                
                 val response = RetrofitClient.api.getGenerationData(authHeader, jsonRequest)
                 val prompt = response.result.data.json?.meta?.prompt
-                loadedPrompt = prompt?.trim() ?: "Промпт для этого изображения скрыт автором или отсутствует."
+                loadedPrompt = prompt?.trim() ?: "Промпт скрыт автором или отсутствует."
             } catch (e: Exception) {
                 loadedPrompt = "Ошибка загрузки промпта: ${e.localizedMessage}"
             } finally {
@@ -166,10 +180,10 @@ fun MainScreen() {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Шапка и Вкладки
+        // Вкладки
         TabRow(selectedTabIndex = activeTab) {
             Tab(selected = activeTab == 0, onClick = { activeTab = 0 }) {
-                Text("Разметка", modifier = Modifier.padding(16.dp))
+                Text("Разметка [${currentDbName}]", modifier = Modifier.padding(16.dp))
             }
             Tab(selected = activeTab == 1, onClick = { activeTab = 1 }) {
                 Text("Статистика (${dataset.size})", modifier = Modifier.padding(16.dp))
@@ -183,7 +197,7 @@ fun MainScreen() {
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
-                // Настройки
+                // Настройки поиска и NSFW
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -227,23 +241,14 @@ fun MainScreen() {
                             scope.launch {
                                 try {
                                     val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
-                                    
                                     val response = RetrofitClient.api.getImages(
                                         authHeader = authHeader,
                                         period = selectedPeriod,
                                         nsfw = if (nsfwEnabled) true else null
                                     )
-                                    
-                                    // Теперь сохраняем ВСЕ картинки без фильтрации на старте
                                     images = response.items
                                     currentBatchIndex = 0
-                                    
-                                    Toast.makeText(
-                                        context, 
-                                        "Загружено изображений с сервера: ${images.size}", 
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                    
+                                    Toast.makeText(context, "Загружено изображений: ${images.size}", Toast.LENGTH_SHORT).show()
                                 } catch (e: Exception) {
                                     Toast.makeText(context, "Ошибка сети: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
                                 } finally {
@@ -263,7 +268,6 @@ fun MainScreen() {
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Поле для токена
                 OutlinedTextField(
                     value = apiToken,
                     onValueChange = { apiToken = it },
@@ -334,17 +338,60 @@ fun MainScreen() {
                     }
                 } else {
                     Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        Text("Нажмите «Загрузить», чтобы получить изображения", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Нажмите «Загрузить», чтобы получить изображения\nЗапись ведется в базу: $currentDbName.json", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
         } else {
-            // ВКЛАДКА: СТАТИСТИКА И БАЗА
+            // ВКЛАДКА: СТАТИСТИКА, УПРАВЛЕНИЕ БАЗАМИ И ПОИСК
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
+                // Панель выбора и создания баз данных
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    var expandedDbMenu by remember { mutableStateOf(false) }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("База: ", fontWeight = FontWeight.Bold)
+                        Box {
+                            Text(
+                                "$currentDbName.json",
+                                modifier = Modifier
+                                    .clickable { expandedDbMenu = true }
+                                    .padding(8.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                            DropdownMenu(expanded = expandedDbMenu, onDismissRequest = { expandedDbMenu = false }) {
+                                dbList.forEach { db ->
+                                    DropdownMenuItem(
+                                        text = { Text("$db.json") },
+                                        onClick = {
+                                            currentDbName = db
+                                            expandedDbMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = { showCreateDbDialog = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                    ) {
+                        Text("Создать базу")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
                 // Карточки со статистикой
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -372,24 +419,38 @@ fun MainScreen() {
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // Кнопка экспорта
+                // Поисковая строка для фильтрации
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    label = { Text("Поиск по базе...") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Кнопка экспорта активной базы
                 Button(
-                    onClick = {
-                        exportDataset(context, dataset)
-                    },
+                    onClick = { exportDataset(context, dataset, currentDbName) },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = dataset.isNotEmpty()
                 ) {
-                    Text("Экспортировать датасет (Share JSON)")
+                    Text("Поделиться базой $currentDbName.json")
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // Список записей с возможностью удаления
+                // Список записей с фильтрацией поиска
+                val filteredDataset = dataset.filter {
+                    it.input.contains(searchQuery, ignoreCase = true) || 
+                    it.output.contains(searchQuery, ignoreCase = true)
+                }
+
                 LazyColumn(modifier = Modifier.weight(1f)) {
-                    itemsIndexed(dataset) { index, item ->
+                    itemsIndexed(filteredDataset) { index, item ->
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -407,13 +468,24 @@ fun MainScreen() {
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text("Output: ${item.output}", fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 }
-                                IconButton(onClick = {
-                                    val mutableList = dataset.toMutableList()
-                                    mutableList.removeAt(index)
-                                    dataset = mutableList
-                                    saveDatasetToFile(context, dataset)
-                                }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                                Row {
+                                    // Кнопка редактирования
+                                    IconButton(onClick = {
+                                        editingItemIndex = index
+                                        editInputText = item.input
+                                        editOutputText = item.output
+                                    }) {
+                                        Icon(Icons.Default.Edit, contentDescription = "Edit", tint = MaterialTheme.colorScheme.primary)
+                                    }
+                                    // Кнопка удаления
+                                    IconButton(onClick = {
+                                        val mutableList = dataset.toMutableList()
+                                        mutableList.removeAt(index)
+                                        dataset = mutableList
+                                        saveDatasetToFile(context, dataset, currentDbName)
+                                    }) {
+                                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                                    }
                                 }
                             }
                         }
@@ -423,7 +495,124 @@ fun MainScreen() {
         }
     }
 
-    // МОДАЛЬНОЕ ОКНО ДЛЯ РАЗМЕТКИ
+    // ДИАЛОГ СОЗДАНИЯ НОВОЙ БАЗЫ ДАННЫХ
+    if (showCreateDbDialog) {
+        AlertDialog(
+            onDismissRequest = { showCreateDbDialog = false },
+            title = { Text("Создать новую базу данных") },
+            text = {
+                Column {
+                    Text("Введите имя базы (без расширения .json):", fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = newDbNameInput,
+                        onValueChange = { newDbNameInput = it.replace(Regex("[^a-zA-Z0-9_]"), "") },
+                        placeholder = { Text("Например: anime_db") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val cleanedName = newDbNameInput.trim()
+                    if (cleanedName.isNotBlank()) {
+                        currentDbName = cleanedName
+                        dataset = emptyList() // Новая база изначально пуста
+                        saveDatasetToFile(context, dataset, currentDbName)
+                        dbList = getDatabaseList(context)
+                        newDbNameInput = ""
+                        showCreateDbDialog = false
+                        Toast.makeText(context, "База $cleanedName.json успешно создана", Toast.LENGTH_SHORT).show()
+                    }
+                }) {
+                    Text("Создать")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateDbDialog = false }) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
+
+    // ДИАЛОГ РЕДАКТИРОВАНИЯ ЗАПИСИ
+    editingItemIndex?.let { index ->
+        Dialog(onDismissRequest = { editingItemIndex = null }) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.8f),
+                shape = MaterialTheme.shapes.large
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(16.dp)
+                ) {
+                    Text("Редактирование записи", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text("Изменить описание (Input):", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = editInputText,
+                            onValueChange = { editInputText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            maxLines = 4
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        Text("Изменить промпт (Output):", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = editOutputText,
+                            onValueChange = { editOutputText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            maxLines = 8
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = { editingItemIndex = null }) {
+                            Text("Отмена")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(onClick = {
+                            if (editInputText.isNotBlank() && editOutputText.isNotBlank()) {
+                                val mutableList = dataset.toMutableList()
+                                mutableList[index] = DatasetItem(
+                                    input = editInputText,
+                                    output = editOutputText
+                                )
+                                dataset = mutableList
+                                saveDatasetToFile(context, dataset, currentDbName)
+                                editingItemIndex = null
+                                Toast.makeText(context, "Запись обновлена!", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Поля не могут быть пустыми!", Toast.LENGTH_SHORT).show()
+                            }
+                        }) {
+                            Text("Применить")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // МОДАЛЬНОЕ ОКНО ДЛЯ РАЗМЕТКИ КАРТИНКИ
     selectedImage?.let { img ->
         Dialog(onDismissRequest = { selectedImage = null }) {
             Card(
@@ -437,7 +626,6 @@ fun MainScreen() {
                         .fillMaxSize()
                         .padding(16.dp)
                 ) {
-                    // Картинка
                     AsyncImage(
                         model = img.url,
                         contentDescription = null,
@@ -449,7 +637,6 @@ fun MainScreen() {
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Прокручиваемый контент формы
                     Column(
                         modifier = Modifier
                             .weight(1f)
@@ -485,7 +672,6 @@ fun MainScreen() {
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Кнопки сохранения/отмены
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.End
@@ -502,7 +688,7 @@ fun MainScreen() {
                                         output = loadedPrompt
                                     )
                                     dataset = dataset + newItem
-                                    saveDatasetToFile(context, dataset)
+                                    saveDatasetToFile(context, dataset, currentDbName)
                                     selectedImage = null
                                     userDescription = ""
                                     Toast.makeText(context, "Сохранено!", Toast.LENGTH_SHORT).show()
@@ -525,14 +711,21 @@ fun MainScreen() {
 }
 
 // ================= FILE STORAGE & EXPORT =================
-private const val FILE_NAME = "dataset.json"
 
-private fun getDatasetFile(context: Context): File {
-    return File(context.filesDir, FILE_NAME)
+// Получение списка всех сохраненных .json баз данных на устройстве
+private fun getDatabaseList(context: Context): List<String> {
+    val files = context.filesDir.listFiles() ?: return listOf("dataset")
+    val dbNames = files.filter { it.name.endsWith(".json") }
+                       .map { it.name.substringBeforeLast(".json") }
+    return if (dbNames.isEmpty()) listOf("dataset") else dbNames
 }
 
-private fun loadDatasetFromFile(context: Context): List<DatasetItem> {
-    val file = getDatasetFile(context)
+private fun getDatasetFile(context: Context, dbName: String): File {
+    return File(context.filesDir, "$dbName.json")
+}
+
+private fun loadDatasetFromFile(context: Context, dbName: String): List<DatasetItem> {
+    val file = getDatasetFile(context, dbName)
     if (!file.exists()) return emptyList()
     return try {
         val json = file.readText()
@@ -543,8 +736,8 @@ private fun loadDatasetFromFile(context: Context): List<DatasetItem> {
     }
 }
 
-private fun saveDatasetToFile(context: Context, dataset: List<DatasetItem>) {
-    val file = getDatasetFile(context)
+private fun saveDatasetToFile(context: Context, dataset: List<DatasetItem>, dbName: String) {
+    val file = getDatasetFile(context, dbName)
     try {
         val gson = GsonBuilder().setPrettyPrinting().create()
         val json = gson.toJson(dataset)
@@ -554,13 +747,12 @@ private fun saveDatasetToFile(context: Context, dataset: List<DatasetItem>) {
     }
 }
 
-private fun exportDataset(context: Context, dataset: List<DatasetItem>) {
+private fun exportDataset(context: Context, dataset: List<DatasetItem>, dbName: String) {
     try {
         val gson = GsonBuilder().setPrettyPrinting().create()
         val json = gson.toJson(dataset)
 
-        // Записываем файл во временную директорию (кэш) для экспорта
-        val exportFile = File(context.cacheDir, "dataset.json")
+        val exportFile = File(context.cacheDir, "$dbName.json")
         exportFile.writeText(json)
 
         val uri = FileProvider.getUriForFile(
