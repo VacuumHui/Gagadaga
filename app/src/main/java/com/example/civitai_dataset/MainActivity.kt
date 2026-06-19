@@ -31,7 +31,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.FileProvider
+import coil.Coil
+import coil.ImageLoader
 import coil.compose.AsyncImage
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
@@ -93,6 +97,25 @@ object RetrofitClient {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Инициализация кэш-менеджера Coil с лимитом в 1 ГБ диска и 25% ОЗУ устройства
+        val imageLoader = ImageLoader.Builder(this)
+            .memoryCache {
+                MemoryCache.Builder(this)
+                    .maxSizePercent(0.25) // 25% от доступной приложению оперативной памяти
+                    .build()
+            }
+            .diskCache {
+                DiskCache.Builder()
+                    .directory(this.cacheDir.resolve("image_cache"))
+                    .maxSizeBytes(1024 * 1024 * 1024) // 1 ГБ в байтах
+                    .build()
+            }
+            .build()
+        
+        // Устанавливаем данный загрузчик как глобальный для всего приложения
+        Coil.setImageLoader(imageLoader)
+
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(
@@ -112,7 +135,6 @@ fun MainScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // Состояние вкладок
     var activeTab by remember { mutableIntStateOf(0) } 
 
     // Настройки запроса
@@ -136,6 +158,7 @@ fun MainScreen() {
     var currentDbName by remember { mutableStateOf("dataset") }
     var dbList by remember { mutableStateOf(listOf("dataset")) }
     var showCreateDbDialog by remember { mutableStateOf(false) }
+    var showDeleteDbDialog by remember { mutableStateOf(false) }
     var newDbNameInput by remember { mutableStateOf("") }
 
     // Локальный датасет
@@ -349,7 +372,7 @@ fun MainScreen() {
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
-                // Панель выбора и создания баз данных
+                // Панель выбора, создания и удаления баз данных
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -382,11 +405,22 @@ fun MainScreen() {
                         }
                     }
 
-                    Button(
-                        onClick = { showCreateDbDialog = true },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                    ) {
-                        Text("Создать базу")
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Button(
+                            onClick = { showCreateDbDialog = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text("Создать", fontSize = 12.sp)
+                        }
+
+                        Button(
+                            onClick = { showDeleteDbDialog = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text("Удалить", fontSize = 12.sp)
+                        }
                     }
                 }
 
@@ -432,13 +466,37 @@ fun MainScreen() {
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Кнопка экспорта активной базы
-                Button(
-                    onClick = { exportDataset(context, dataset, currentDbName) },
+                // Ряд кнопок для действий
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = dataset.isNotEmpty()
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("Поделиться базой $currentDbName.json")
+                    Button(
+                        onClick = { exportDataset(context, dataset, currentDbName) },
+                        modifier = Modifier.weight(1f),
+                        enabled = dataset.isNotEmpty(),
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text("Поделиться базой", fontSize = 13.sp)
+                    }
+
+                    Button(
+                        onClick = {
+                            Coil.imageLoader(context).let { loader ->
+                                loader.memoryCache?.clear()
+                                loader.diskCache?.clear()
+                            }
+                            Toast.makeText(context, "Кэш картинок успешно очищен!", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text("Очистить кэш (1 ГБ)", fontSize = 13.sp)
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -530,6 +588,48 @@ fun MainScreen() {
             },
             dismissButton = {
                 TextButton(onClick = { showCreateDbDialog = false }) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
+
+    // ДИАЛОГ УДАЛЕНИЯ ТЕКУЩЕЙ БАЗЫ ДАННЫХ
+    if (showDeleteDbDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDbDialog = false },
+            title = { Text("Удалить базу данных") },
+            text = {
+                Text("Вы действительно хотите полностью стереть базу данных \"$currentDbName.json\"? Все записи в ней будут безвозвратно удалены.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val file = getDatasetFile(context, currentDbName)
+                        if (file.exists()) {
+                            file.delete()
+                        }
+                        
+                        val remaining = getDatabaseList(context)
+                        if (remaining.isEmpty()) {
+                            // Если баз больше не осталось, создаем заново дефолтную базу dataset.json
+                            currentDbName = "dataset"
+                            saveDatasetToFile(context, emptyList(), "dataset")
+                        } else {
+                            currentDbName = remaining.first()
+                        }
+                        
+                        dbList = getDatabaseList(context)
+                        showDeleteDbDialog = false
+                        Toast.makeText(context, "База данных успешно удалена", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Удалить")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteDbDialog = false }) {
                     Text("Отмена")
                 }
             }
