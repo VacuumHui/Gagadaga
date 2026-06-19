@@ -40,6 +40,7 @@ import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
@@ -54,7 +55,7 @@ data class CivitaiMetadata(val nextCursor: String?)
 data class CivitaiImage(
     val id: Long, 
     val url: String, 
-    val username: String?, // Никнейм автора картинки
+    val username: String?, 
     val meta: CivitaiMeta?
 )
 data class CivitaiMeta(val prompt: String?)
@@ -81,8 +82,8 @@ interface CivitaiApi {
         @Query("sort") sort: String = "Most Reactions",
         @Query("period") period: String,
         @Query("nsfw") nsfw: Boolean?,
-        @Query("username") username: String?, // Поиск по автору
-        @Query("cursor") cursor: String? // Курсор для пагинации
+        @Query("username") username: String?, 
+        @Query("cursor") cursor: String? 
     ): CivitaiResponse
 
     @GET("api/trpc/image.getGenerationData")
@@ -108,8 +109,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Инициализация кэш-менеджера Coil (Лимит 1 ГБ диска, 25% ОЗУ)
+        // Настраиваем сетевой клиент OkHttp для подмены User-Agent (обход Cloudflare)
+        val okHttpClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request().newBuilder()
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+                    .build()
+                chain.proceed(request)
+            }
+            .build()
+
+        // Настройка кэш-менеджера Coil (Лимит 1 ГБ диска, 25% ОЗУ)
         val imageLoader = ImageLoader.Builder(this)
+            .okHttpClient(okHttpClient) // Внедряем наш OkHttpClient с обходом блокировок
             .memoryCache {
                 MemoryCache.Builder(this)
                     .maxSizePercent(0.25)
@@ -148,10 +160,10 @@ fun MainScreen() {
 
     // Настройки запроса
     var selectedPeriod by remember { mutableStateOf("Week") }
-    var selectedSort by remember { mutableStateOf("Most Reactions") } // "Most Reactions" или "Newest"
+    var selectedSort by remember { mutableStateOf("Most Reactions") } 
     var nsfwEnabled by remember { mutableStateOf(false) }
     var apiToken by remember { mutableStateOf("") }
-    var activeUsername by remember { mutableStateOf("") } // Активный фильтр по автору
+    var activeUsername by remember { mutableStateOf("") } 
 
     // Данные изображений и пагинации
     var images by remember { mutableStateOf<List<CivitaiImage>>(emptyList()) }
@@ -314,9 +326,18 @@ fun MainScreen() {
                                         nsfw = if (nsfwEnabled) true else null,
                                         sort = selectedSort,
                                         username = activeUsername.ifBlank { null },
-                                        cursor = null // Сбрасываем курсор на первую страницу при новом запросе
+                                        cursor = null 
                                     )
-                                    images = response.items
+                                    
+                                    // Отсеиваем видеофайлы (.mp4, .webm, .mov)
+                                    images = response.items.filter { 
+                                        val url = it.url.lowercase()
+                                        !url.endsWith(".mp4") && 
+                                        !url.endsWith(".webm") && 
+                                        !url.endsWith(".mov") && 
+                                        !url.endsWith(".avi")
+                                    }
+                                    
                                     nextCursor = response.metadata?.nextCursor
                                     currentBatchIndex = 0
                                     Toast.makeText(context, "Загружено изображений: ${images.size}", Toast.LENGTH_SHORT).show()
@@ -359,7 +380,6 @@ fun MainScreen() {
                                 modifier = Modifier
                                     .clickable {
                                         activeUsername = ""
-                                        // Автозапуск загрузки без фильтра автора
                                         isLoading = true
                                         scope.launch {
                                             try {
@@ -372,7 +392,13 @@ fun MainScreen() {
                                                     username = null,
                                                     cursor = null
                                                 )
-                                                images = response.items
+                                                images = response.items.filter { 
+                                                    val url = it.url.lowercase()
+                                                    !url.endsWith(".mp4") && 
+                                                    !url.endsWith(".webm") && 
+                                                    !url.endsWith(".mov") && 
+                                                    !url.endsWith(".avi")
+                                                }
                                                 nextCursor = response.metadata?.nextCursor
                                                 currentBatchIndex = 0
                                             } catch (e: Exception) {
@@ -457,7 +483,6 @@ fun MainScreen() {
                         Button(
                             onClick = {
                                 if (isLastBatch && canLoadMore) {
-                                    // Авто-подгрузка следующих 100 изображений по токену курсора
                                     isLoading = true
                                     scope.launch {
                                         try {
@@ -470,7 +495,14 @@ fun MainScreen() {
                                                 username = activeUsername.ifBlank { null },
                                                 cursor = nextCursor
                                             )
-                                            images = images + response.items
+                                            val newItems = response.items.filter { 
+                                                val url = it.url.lowercase()
+                                                !url.endsWith(".mp4") && 
+                                                !url.endsWith(".webm") && 
+                                                !url.endsWith(".mov") && 
+                                                !url.endsWith(".avi")
+                                            }
+                                            images = images + newItems
                                             nextCursor = response.metadata?.nextCursor
                                             currentBatchIndex += 4
                                         } catch (e: Exception) {
@@ -911,7 +943,13 @@ fun MainScreen() {
                                                     username = name,
                                                     cursor = null
                                                 )
-                                                images = response.items
+                                                images = response.items.filter { 
+                                                    val url = it.url.lowercase()
+                                                    !url.endsWith(".mp4") && 
+                                                    !url.endsWith(".webm") && 
+                                                    !url.endsWith(".mov") && 
+                                                    !url.endsWith(".avi")
+                                                }
                                                 nextCursor = response.metadata?.nextCursor
                                                 currentBatchIndex = 0
                                             } catch (e: Exception) {
