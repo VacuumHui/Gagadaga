@@ -78,7 +78,7 @@ interface CivitaiApi {
     @GET("api/v1/images")
     suspend fun getImages(
         @Header("Authorization") authHeader: String?,
-        @Query("limit") limit: Int,                // Явный лимит без дефолтных значений Kotlin
+        @Query("limit") limit: Int,
         @Query("sort") sort: String,
         @Query("period") period: String,
         @Query("nsfw") nsfw: Boolean?,
@@ -165,9 +165,10 @@ fun MainScreen() {
     var apiToken by remember { mutableStateOf("") }
     var activeUsername by remember { mutableStateOf("") }
 
-    // Данные изображений
+    // Данные изображений и пагинации
     var images by remember { mutableStateOf<List<CivitaiImage>>(emptyList()) }
     var currentBatchIndex by remember { mutableIntStateOf(0) }
+    var nextCursor by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(false) }
 
     // Выбранная картинка для разметки
@@ -321,7 +322,7 @@ fun MainScreen() {
                                     val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
                                     val response = RetrofitClient.api.getImages(
                                         authHeader = authHeader,
-                                        limit = 14, // Запрашиваем легкую пачку из 14 штук
+                                        limit = 14, // Легкий нативный лимит по 14 штук
                                         sort = selectedSort,
                                         period = selectedPeriod,
                                         nsfw = if (nsfwEnabled) true else null,
@@ -490,7 +491,7 @@ fun MainScreen() {
                                             val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
                                             val response = RetrofitClient.api.getImages(
                                                 authHeader = authHeader,
-                                                limit = 14, // Подгружаем следующую порцию из 14 штук
+                                                limit = 14,
                                                 sort = selectedSort,
                                                 period = selectedPeriod,
                                                 nsfw = if (nsfwEnabled) true else null,
