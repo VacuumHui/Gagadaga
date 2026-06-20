@@ -78,8 +78,8 @@ interface CivitaiApi {
     @GET("api/v1/images")
     suspend fun getImages(
         @Header("Authorization") authHeader: String?,
-        @Query("limit") limit: Int = 100,
-        @Query("sort") sort: String = "Most Reactions",
+        @Query("limit") limit: Int,                // Явный лимит без дефолтных значений Kotlin
+        @Query("sort") sort: String,
         @Query("period") period: String,
         @Query("nsfw") nsfw: Boolean?,
         @Query("username") username: String?, 
@@ -109,7 +109,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Настраиваем сетевой клиент OkHttp для подмены User-Agent (обход Cloudflare)
+        // Сетевой клиент OkHttp для подмены User-Agent (обход Cloudflare)
         val okHttpClient = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val request = chain.request().newBuilder()
@@ -119,9 +119,9 @@ class MainActivity : ComponentActivity() {
             }
             .build()
 
-        // Настройка кэш-менеджера Coil (Лимит 1 ГБ диска, 25% ОЗУ)
+        // Кэш-менеджер Coil (Лимит 1 ГБ диска, 25% ОЗУ)
         val imageLoader = ImageLoader.Builder(this)
-            .okHttpClient(okHttpClient) // Внедряем наш OkHttpClient с обходом блокировок
+            .okHttpClient(okHttpClient)
             .memoryCache {
                 MemoryCache.Builder(this)
                     .maxSizePercent(0.25)
@@ -163,12 +163,11 @@ fun MainScreen() {
     var selectedSort by remember { mutableStateOf("Most Reactions") } 
     var nsfwEnabled by remember { mutableStateOf(false) }
     var apiToken by remember { mutableStateOf("") }
-    var activeUsername by remember { mutableStateOf("") } 
+    var activeUsername by remember { mutableStateOf("") }
 
-    // Данные изображений и пагинации
+    // Данные изображений
     var images by remember { mutableStateOf<List<CivitaiImage>>(emptyList()) }
     var currentBatchIndex by remember { mutableIntStateOf(0) }
-    var nextCursor by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(false) }
 
     // Выбранная картинка для разметки
@@ -244,14 +243,14 @@ fun MainScreen() {
                     .fillMaxSize()
                     .padding(16.dp)
             ) {
-                // Строка настроек и запуска загрузки
+                // Настройки и запуск загрузки
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Column {
-                        // Топ за период
+                        // Период
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Топ за: ", fontSize = 12.sp)
                             val periods = listOf("Day", "Week", "Month", "Year")
@@ -279,7 +278,7 @@ fun MainScreen() {
                                 }
                             }
                         }
-                        // Сортировка (Популярные / Новые)
+                        // Сортировка
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("Сорт: ", fontSize = 12.sp)
                             val sorts = mapOf("Most Reactions" to "Популярные", "Newest" to "Новые")
@@ -322,14 +321,15 @@ fun MainScreen() {
                                     val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
                                     val response = RetrofitClient.api.getImages(
                                         authHeader = authHeader,
+                                        limit = 14, // Запрашиваем легкую пачку из 14 штук
+                                        sort = selectedSort,
                                         period = selectedPeriod,
                                         nsfw = if (nsfwEnabled) true else null,
-                                        sort = selectedSort,
                                         username = activeUsername.ifBlank { null },
                                         cursor = null 
                                     )
                                     
-                                    // Отсеиваем видеофайлы (.mp4, .webm, .mov)
+                                    // Отсеиваем видеоролики (.mp4, .webm, .mov)
                                     images = response.items.filter { 
                                         val url = it.url.lowercase()
                                         !url.endsWith(".mp4") && 
@@ -340,7 +340,7 @@ fun MainScreen() {
                                     
                                     nextCursor = response.metadata?.nextCursor
                                     currentBatchIndex = 0
-                                    Toast.makeText(context, "Загружено изображений: ${images.size}", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "Успешно получено: ${images.size}", Toast.LENGTH_SHORT).show()
                                 } catch (e: Exception) {
                                     Toast.makeText(context, "Ошибка сети: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
                                 } finally {
@@ -360,7 +360,7 @@ fun MainScreen() {
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                // Фильтр-плашка активного автора (если выбран)
+                // Фильтр автора
                 if (activeUsername.isNotBlank()) {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
@@ -386,9 +386,10 @@ fun MainScreen() {
                                                 val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
                                                 val response = RetrofitClient.api.getImages(
                                                     authHeader = authHeader,
+                                                    limit = 14,
+                                                    sort = selectedSort,
                                                     period = selectedPeriod,
                                                     nsfw = if (nsfwEnabled) true else null,
-                                                    sort = selectedSort,
                                                     username = null,
                                                     cursor = null
                                                 )
@@ -489,9 +490,10 @@ fun MainScreen() {
                                             val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
                                             val response = RetrofitClient.api.getImages(
                                                 authHeader = authHeader,
+                                                limit = 14, // Подгружаем следующую порцию из 14 штук
+                                                sort = selectedSort,
                                                 period = selectedPeriod,
                                                 nsfw = if (nsfwEnabled) true else null,
-                                                sort = selectedSort,
                                                 username = activeUsername.ifBlank { null },
                                                 cursor = nextCursor
                                             )
@@ -937,9 +939,10 @@ fun MainScreen() {
                                                 val authHeader = if (apiToken.isNotBlank()) "Bearer ${apiToken.trim()}" else null
                                                 val response = RetrofitClient.api.getImages(
                                                     authHeader = authHeader,
+                                                    limit = 14,
+                                                    sort = selectedSort,
                                                     period = selectedPeriod,
                                                     nsfw = if (nsfwEnabled) true else null,
-                                                    sort = selectedSort,
                                                     username = name,
                                                     cursor = null
                                                 )
